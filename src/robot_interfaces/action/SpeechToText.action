@@ -1,0 +1,5 @@
+robot_interfaces/SpeechAudio audio_packet
+---
+string transcript
+---
+string status
