@@ -20,11 +20,20 @@ EXPECTED_SAMPLE_RATE: int = 16_000
 def _default_whisper_model_path() -> str:
     """Find the conventional model path without requiring a sourced shell."""
     colcon_prefixes = os.environ.get("COLCON_PREFIX_PATH", "")
-    if colcon_prefixes:
-        models_dir = Path(colcon_prefixes.split(":")[0]).parent.parent / "models"
-    else:
-        # Models live beside src/ at <workspace>/models.
-        models_dir = Path(__file__).resolve().parents[3] / "models"
+    for prefix_value in filter(None, colcon_prefixes.split(os.pathsep)):
+        prefix = Path(prefix_value).expanduser()
+        # Colcon may use <workspace>/install or
+        # <workspace>/install/<package> as an environment prefix.
+        for models_dir in (prefix / "models", prefix.parent / "models"):
+            if models_dir.is_dir():
+                return str(models_dir / "tiny.pt")
+        if prefix.parent.name == "install":
+            models_dir = prefix.parent.parent / "models"
+            if models_dir.is_dir():
+                return str(models_dir / "tiny.pt")
+
+    # This also works with --symlink-install because resolve() reaches src/.
+    models_dir = Path(__file__).resolve().parents[3] / "models"
     return str(models_dir / "tiny.pt")
 
 
@@ -50,9 +59,12 @@ class SttNode(Node):
 
         self.get_logger().info("Loading Whisper model …")
         self.declare_parameter("whisper_model_path", _default_whisper_model_path())
+        self.declare_parameter("language", "en")
         self.declare_parameter("expected_sample_rate", EXPECTED_SAMPLE_RATE)
         self.declare_parameter("max_audio_duration_s", 30.0)
         model_path = self.get_parameter("whisper_model_path").get_parameter_value().string_value
+        language = self.get_parameter("language").get_parameter_value().string_value.strip()
+        self._language = language or None
         self._expected_sample_rate = self.get_parameter(
             "expected_sample_rate"
         ).get_parameter_value().integer_value
@@ -68,7 +80,9 @@ class SttNode(Node):
             raise ValueError("Parameter 'max_audio_duration_s' must be greater than zero.")
         self.get_logger().info(f"Whisper model path: {model_path}")
         self._stt_model = _load_stt_model(model_path)
-        self.get_logger().info("Whisper model ready.")
+        self.get_logger().info(
+            f"Whisper model ready; language={self._language or 'auto'}."
+        )
 
         self._action_server = ActionServer(
             self,
@@ -134,7 +148,10 @@ class SttNode(Node):
             feedback_msg.status = "inference_started"
             goal_handle.publish_feedback(feedback_msg)
 
-            result_data = self._stt_model.transcribe(audio_f32, fp16=False)
+            transcribe_options: dict[str, object] = {"fp16": False}
+            if self._language is not None:
+                transcribe_options["language"] = self._language
+            result_data = self._stt_model.transcribe(audio_f32, **transcribe_options)
             transcript = result_data["text"].strip()
 
             # Whisper cannot be safely interrupted mid-inference. The action is
