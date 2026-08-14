@@ -2,19 +2,26 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>trigger_engine</name>
-  <version>0.1.0</version>
-  <description>Orchestrator / brain node that wires VAD → STT → LLM → TTS</description>
+  <version>0.2.0</version>
+  <description>Bounded audio/visual event fusion and mock VLM input manager</description>
   <maintainer email="your@email.com">Your Name</maintainer>
   <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
-  <depend>std_msgs</depend>
   <depend>action_msgs</depend>
+  <depend>builtin_interfaces</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>robot_interfaces</depend>
+  <exec_depend>audio_pipeline</exec_depend>
+  <exec_depend>vision_pipeline</exec_depend>
+  <exec_depend>vlm_pipeline</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
 
-  <test_depend>ament_copyright</test_depend>
-  <test_depend>ament_flake8</test_depend>
-  <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
 
   <export>
