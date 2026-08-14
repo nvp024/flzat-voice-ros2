@@ -1,0 +1,5 @@
+EVENT_TYPE: __EVENT_TYPE_JSON__
+TRIGGER_REASON: __TRIGGER_REASON_JSON__
+HUMAN_COMMAND: __HUMAN_COMMAND_JSON__
+
+Interpret HUMAN_COMMAND as the person's explicit request. Use the current image for grounding. If the target or intent is unclear, ask one short clarification question. Otherwise answer briefly and naturally. Do not report that a physical action has already happened.

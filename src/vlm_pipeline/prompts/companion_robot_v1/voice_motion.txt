@@ -1,0 +1,5 @@
+EVENT_TYPE: __EVENT_TYPE_JSON__
+TRIGGER_REASON: __TRIGGER_REASON_JSON__
+HUMAN_COMMAND: __HUMAN_COMMAND_JSON__
+
+Interpret HUMAN_COMMAND as the person's explicit request. The motion event may represent pointing or another gesture, so use the image to resolve words such as "this", "that", or "there". If visual grounding is uncertain, ask one short clarification question. Do not report that a physical action has already happened.
