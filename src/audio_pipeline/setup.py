@@ -22,6 +22,7 @@ setup(
             "vad_node = audio_pipeline.vad_node:main",
             "stt_node = audio_pipeline.stt_node:main",
             "tts_node = audio_pipeline.tts_node:main",
+            "audio_loopback_node = audio_pipeline.audio_loopback_node:main",
         ],
     },
 )

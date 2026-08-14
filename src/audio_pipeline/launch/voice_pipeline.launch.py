@@ -57,11 +57,11 @@ def generate_launch_description():
             emulate_tty=True,
         ),
 
-        # 4. Orchestrator — subscribes /audio_events, calls STT → TTS
+        # 4. Audio-only test bridge — VAD → STT → TTS
         Node(
-            package="trigger_engine",
-            executable="audio_visual_trigger",
-            name="audio_visual_trigger",
+            package="audio_pipeline",
+            executable="audio_loopback_node",
+            name="audio_loopback_node",
             output="screen",
             emulate_tty=True,
         ),
