@@ -1,0 +1,8 @@
+builtin_interfaces/Time target_stamp
+float64 before_s
+float64 after_s
+uint32 max_frames
+---
+bool success
+string message
+sensor_msgs/CompressedImage[] frames

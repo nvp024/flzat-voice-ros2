@@ -1,0 +1,7 @@
+robot_interfaces/MultimodalEvent input
+---
+bool success
+string response_text
+string error_message
+---
+string status

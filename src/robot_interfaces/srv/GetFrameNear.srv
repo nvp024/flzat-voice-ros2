@@ -1,0 +1,6 @@
+builtin_interfaces/Time target_stamp
+float64 max_age_s
+---
+bool success
+string message
+sensor_msgs/CompressedImage frame
