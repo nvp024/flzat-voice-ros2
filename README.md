@@ -2,7 +2,8 @@
 
 This workspace contains a V0.1 real-time companion robot pipeline combining
 microphone audio, camera images, a vision-language model (VLM), and speech
-output.
+output. Version 1.1 is being added incrementally; Parts 1 and 2 implement the
+usable-final-STT barrier, bounded scheduling, and cooperative VLM cancellation.
 
 ## Pipeline
 
@@ -96,8 +97,10 @@ ros2 topic echo /multimodal/vlm_response std_msgs/msg/String
 
 ## Documentation
 
-- `PIPELINE_STATUS.md`: current implementation status and architecture.
-- `COMPANION_PIPELINE_TESTING.md`: full camera/audio/VLM/TTS testing.
-- `MULTIMODAL_TESTING.md`: camera and voice fusion testing.
-- `VLM_TESTING.md`: standalone VLM testing.
-- `PLANNING.md`: incremental V1 development plan.
+- `docs/PIPELINE_STATUS.md`: Version 0.1 status and architecture.
+- `docs/COMPANION_PIPELINE_TESTING.md`: full pipeline testing.
+- `docs/MULTIMODAL_TESTING.md`: camera and voice fusion testing.
+- `docs/VLM_TESTING.md`: standalone VLM testing.
+- `docs/PLANNING_v1.1.md`: incremental Version 1.1 design and acceptance plan.
+- `docs/V1.1_PART1_TESTING.md`: Part 1 behavior and test procedure.
+- `docs/V1.1_PART2_TESTING.md`: VLM cancellation and preemption testing.

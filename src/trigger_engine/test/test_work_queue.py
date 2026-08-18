@@ -30,3 +30,15 @@ def test_voice_replaces_pending_motion() -> None:
     assert result.accepted is True
     assert result.replaced == "motion"
     assert queue.begin_next() == "voice"
+
+
+def test_take_pending_does_not_change_active_work() -> None:
+    queue = LatestPriorityWorkQueue[str]()
+    queue.submit("active")
+    assert queue.begin_next() == "active"
+    queue.submit("waiting")
+
+    assert queue.take_pending() == "waiting"
+    assert queue.has_pending is False
+    assert queue.active is True
+    queue.complete()

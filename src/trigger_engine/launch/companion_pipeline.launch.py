@@ -44,6 +44,7 @@ def generate_launch_description():
             "local_files_only": LaunchConfiguration("local_files_only"),
             "prompt_profile": LaunchConfiguration("prompt_profile"),
             "prompt_directory": LaunchConfiguration("prompt_directory"),
+            "do_image_splitting": LaunchConfiguration("do_image_splitting"),
         }.items(),
     )
 
@@ -66,6 +67,11 @@ def generate_launch_description():
         DeclareLaunchArgument("voice_fusion_wait_s", default_value="0.8"),
         DeclareLaunchArgument("overlap_tolerance_s", default_value="0.25"),
         DeclareLaunchArgument("motion_vlm_cooldown_s", default_value="5.0"),
+        DeclareLaunchArgument("held_response_ttl_s", default_value="10.0"),
+        DeclareLaunchArgument("pending_motion_ttl_s", default_value="3.0"),
+        DeclareLaunchArgument("pending_voice_ttl_s", default_value="10.0"),
+        DeclareLaunchArgument("active_vlm_timeout_s", default_value="60.0"),
+        DeclareLaunchArgument("vlm_cancel_grace_s", default_value="3.0"),
         DeclareLaunchArgument("backend", default_value="smolvlm2"),
         DeclareLaunchArgument(
             "model_id",
@@ -74,11 +80,12 @@ def generate_launch_description():
         DeclareLaunchArgument("device", default_value="auto"),
         DeclareLaunchArgument("dtype", default_value="auto"),
         DeclareLaunchArgument("quantization", default_value="none"),
-        DeclareLaunchArgument("max_new_tokens", default_value="160"),
+        DeclareLaunchArgument("max_new_tokens", default_value="48"),
         DeclareLaunchArgument("trust_remote_code", default_value="false"),
         DeclareLaunchArgument("local_files_only", default_value="false"),
         DeclareLaunchArgument("prompt_profile", default_value="companion_robot_v1"),
         DeclareLaunchArgument("prompt_directory", default_value=""),
+        DeclareLaunchArgument("do_image_splitting", default_value="false"),
         vision_launch,
         Node(
             package="audio_pipeline",
@@ -131,6 +138,21 @@ def generate_launch_description():
                 ),
                 "motion_vlm_cooldown_s": ParameterValue(
                     LaunchConfiguration("motion_vlm_cooldown_s"), value_type=float
+                ),
+                "held_response_ttl_s": ParameterValue(
+                    LaunchConfiguration("held_response_ttl_s"), value_type=float
+                ),
+                "pending_motion_ttl_s": ParameterValue(
+                    LaunchConfiguration("pending_motion_ttl_s"), value_type=float
+                ),
+                "pending_voice_ttl_s": ParameterValue(
+                    LaunchConfiguration("pending_voice_ttl_s"), value_type=float
+                ),
+                "active_vlm_timeout_s": ParameterValue(
+                    LaunchConfiguration("active_vlm_timeout_s"), value_type=float
+                ),
+                "vlm_cancel_grace_s": ParameterValue(
+                    LaunchConfiguration("vlm_cancel_grace_s"), value_type=float
                 ),
             }],
         ),

@@ -30,6 +30,14 @@ from trigger_engine.fusion import (
     VoiceWindow,
 )
 from trigger_engine.output_policy import speech_from_vlm_response
+from trigger_engine.scheduler import (
+    CancellationDispatch,
+    HeldResponse,
+    VlmScheduler,
+    VlmTask,
+    VlmTaskState,
+    is_usable_transcript,
+)
 from trigger_engine.work_queue import LatestPriorityWorkQueue
 
 
@@ -47,6 +55,7 @@ class VoiceRequest:
     fusion_deadline_ns: int
     stt_state: str = "waiting"
     transcript: str = ""
+    transcript_usable: bool = False
     stt_error: str = ""
     frame: Optional[CompressedImage] = None
     frame_requested: bool = False
@@ -54,6 +63,12 @@ class VoiceRequest:
     frame_done: bool = False
     frame_error: str = ""
     motion: Optional[VisualEvent] = None
+
+
+@dataclass(frozen=True)
+class PendingSpeech:
+    vlm_task_id: int
+    speech: str
 
 
 class MultimodalManager(Node):
@@ -86,6 +101,21 @@ class MultimodalManager(Node):
             self._positive_parameter(
                 "motion_vlm_cooldown_s", allow_zero=True
             ) * 1_000_000_000
+        )
+        self._held_response_ttl_ns = int(
+            self._positive_parameter("held_response_ttl_s") * 1_000_000_000
+        )
+        self._pending_motion_ttl_ns = int(
+            self._positive_parameter("pending_motion_ttl_s") * 1_000_000_000
+        )
+        self._pending_voice_ttl_ns = int(
+            self._positive_parameter("pending_voice_ttl_s") * 1_000_000_000
+        )
+        self._active_vlm_timeout_ns = int(
+            self._positive_parameter("active_vlm_timeout_s") * 1_000_000_000
+        )
+        self._vlm_cancel_grace_ns = int(
+            self._positive_parameter("vlm_cancel_grace_s") * 1_000_000_000
         )
         self._next_motion_vlm_ns = 0
         self._coordinator = FusionCoordinator(
@@ -122,6 +152,11 @@ class MultimodalManager(Node):
             String,
             "/multimodal/vlm_response",
             payload_qos,
+        )
+        self._scheduler_status_pub = self.create_publisher(
+            String,
+            "/multimodal/scheduler_status",
+            preview_qos,
         )
         self._audio_sub = self.create_subscription(
             SpeechAudio,
@@ -165,10 +200,18 @@ class MultimodalManager(Node):
         self._active_stt_id: Optional[int] = None
         self._queued_stt_id: Optional[int] = None
         self._next_request_id = 1
-        self._vlm_queue: LatestPriorityWorkQueue[MultimodalEvent] = (
+        self._next_vlm_task_id = 1
+        self._scheduler: VlmScheduler[MultimodalEvent] = VlmScheduler(
+            self._held_response_ttl_ns,
+            self._active_vlm_timeout_ns,
+        )
+        self._cancel_task_id: Optional[int] = None
+        self._cancel_started_ns = 0
+        self._cancel_degraded = False
+        self._next_cancel_warning_ns = 0
+        self._tts_queue: LatestPriorityWorkQueue[PendingSpeech] = (
             LatestPriorityWorkQueue()
         )
-        self._tts_queue: LatestPriorityWorkQueue[str] = LatestPriorityWorkQueue()
         self._timer = self.create_timer(
             0.05,
             self._on_timer,
@@ -193,6 +236,11 @@ class MultimodalManager(Node):
         self.declare_parameter("frame_timeout_s", 2.0)
         self.declare_parameter("stt_server_timeout_s", 10.0)
         self.declare_parameter("motion_vlm_cooldown_s", 5.0)
+        self.declare_parameter("held_response_ttl_s", 10.0)
+        self.declare_parameter("pending_motion_ttl_s", 3.0)
+        self.declare_parameter("pending_voice_ttl_s", 10.0)
+        self.declare_parameter("active_vlm_timeout_s", 25.0)
+        self.declare_parameter("vlm_cancel_grace_s", 3.0)
 
     def _positive_parameter(self, name: str, allow_zero: bool = False) -> float:
         value = self.get_parameter(name).get_parameter_value().double_value
@@ -213,10 +261,14 @@ class MultimodalManager(Node):
         duration_ns = int(len(audio.audio_data) / audio.sample_rate * 1_000_000_000)
         start_ns = max(0, end_ns - duration_ns)
         now_ns = time.monotonic_ns()
+        moved_pending_speech: Optional[PendingSpeech] = None
+        replaced_held: Optional[HeldResponse] = None
+        released_from_replaced: Optional[HeldResponse] = None
 
         with self._lock:
             request_id = self._next_request_id
             self._next_request_id += 1
+            self._scheduler.register_voice(request_id)
             voice = VoiceRequest(
                 request_id=request_id,
                 audio=audio,
@@ -232,6 +284,15 @@ class MultimodalManager(Node):
             if matched is not None:
                 voice.motion = matched.payload
 
+            moved_pending_speech = self._tts_queue.take_pending()
+            if moved_pending_speech is not None:
+                hold = self._scheduler.hold_response(
+                    moved_pending_speech.vlm_task_id,
+                    moved_pending_speech.speech,
+                    now_ns,
+                )
+                replaced_held = hold.replaced
+
             if self._active_stt_id is None:
                 self._active_stt_id = request_id
             else:
@@ -240,6 +301,12 @@ class MultimodalManager(Node):
                 if replaced is not None:
                     self._voices.pop(replaced, None)
                     self._coordinator.discard_voice(replaced)
+                    resolution = self._scheduler.resolve_voice(
+                        replaced,
+                        usable=False,
+                        now_ns=now_ns,
+                    )
+                    released_from_replaced = resolution.released
                     self.get_logger().warn(
                         f"Replaced queued voice request {replaced} with {request_id}."
                     )
@@ -247,8 +314,23 @@ class MultimodalManager(Node):
         self.get_logger().info(
             f"Voice {request_id}: interval={self._format_ns(start_ns)}.."
             f"{self._format_ns(end_ns)}, samples={len(audio.audio_data)}; "
-            "requesting frame and STT."
+            "requesting baseline frame and STT; downstream dispatch paused."
         )
+        if moved_pending_speech is not None:
+            self.get_logger().info(
+                f"Voice {request_id}: moved pending TTS response from VLM task "
+                f"{moved_pending_speech.vlm_task_id} into the held slot."
+            )
+        if replaced_held is not None:
+            self.get_logger().warn(
+                f"Held response from VLM task {replaced_held.vlm_task_id} was "
+                "replaced by a newer pending response."
+            )
+        if released_from_replaced is not None:
+            self._enqueue_tts(
+                released_from_replaced.speech,
+                released_from_replaced.vlm_task_id,
+            )
         self._request_frame(request_id)
         self._pump_stt()
 
@@ -423,23 +505,99 @@ class MultimodalManager(Node):
         self._finish_stt(request_id, response.result.transcript.strip(), "")
 
     def _finish_stt(self, request_id: int, transcript: str, error: str) -> None:
+        now_ns = time.monotonic_ns()
+        released: Optional[HeldResponse] = None
+        discarded: Optional[HeldResponse] = None
+        invalid_motion: Optional[VisualEvent] = None
+        discarded_pending_vlm: Optional[VlmTask[MultimodalEvent]] = None
+        discarded_pending_tts: Optional[PendingSpeech] = None
+        cancel_dispatch: Optional[CancellationDispatch] = None
+        cancel_task_id: Optional[int] = None
+        usable = False
         with self._lock:
             voice = self._voices.get(request_id)
             if voice is None or voice.stt_state == "done":
                 return
+            usable = not error and is_usable_transcript(transcript)
             voice.stt_state = "done"
             voice.transcript = transcript
+            voice.transcript_usable = usable
             voice.stt_error = error
+            resolution = self._scheduler.resolve_voice(
+                request_id,
+                usable=usable,
+                now_ns=now_ns,
+            )
+            released = resolution.released
+            discarded = resolution.discarded
             if self._active_stt_id == request_id:
                 self._active_stt_id = None
                 self._promote_queued_locked()
-        if error:
+            elif self._queued_stt_id == request_id:
+                self._queued_stt_id = None
+
+            if not usable:
+                self._voices.pop(request_id, None)
+                self._coordinator.discard_voice(request_id)
+                invalid_motion = voice.motion
+            else:
+                discarded_pending_vlm = self._scheduler.discard_pending()
+                discarded_pending_tts = self._tts_queue.take_pending()
+                cancel_transition = self._scheduler.request_active_cancel()
+                if cancel_transition.newly_requested and cancel_transition.task:
+                    cancel_task_id = cancel_transition.task.vlm_task_id
+                    self._start_cancel_diagnostic_locked(cancel_task_id, now_ns)
+                cancel_dispatch = self._scheduler.take_cancellation_dispatch()
+
+        if usable:
+            self.get_logger().info(
+                f"Voice {request_id}: usable final transcript confirmed: "
+                f"'{transcript}'."
+            )
+        elif error:
             self.get_logger().error(f"Voice {request_id}: {error}.")
         else:
             self.get_logger().info(
-                f"Voice {request_id}: transcript='{transcript}'."
+                f"Voice {request_id}: final transcript is not usable; "
+                "no voice VLM request will be created."
             )
+        if discarded is not None:
+            self.get_logger().info(
+                f"Voice {request_id}: discarded held response from VLM task "
+                f"{discarded.vlm_task_id}; it is obsolete or expired."
+            )
+        if discarded_pending_vlm is not None:
+            self.get_logger().info(
+                f"Voice {request_id}: discarded pending obsolete VLM task "
+                f"{discarded_pending_vlm.vlm_task_id}."
+            )
+        if discarded_pending_tts is not None:
+            self.get_logger().info(
+                f"Voice {request_id}: discarded pending TTS response from VLM task "
+                f"{discarded_pending_tts.vlm_task_id}."
+            )
+        if cancel_task_id is not None:
+            self.get_logger().info(
+                f"Voice {request_id}: requesting cancellation of obsolete VLM task "
+                f"{cancel_task_id}."
+            )
+        if cancel_dispatch is not None:
+            self._dispatch_vlm_cancel(cancel_dispatch)
+        if released is not None:
+            self.get_logger().info(
+                f"Voice {request_id}: STT was not usable; releasing held response "
+                f"from VLM task {released.vlm_task_id} to TTS."
+            )
+            self._enqueue_tts(released.speech, released.vlm_task_id)
+        if invalid_motion is not None:
+            self.get_logger().info(
+                f"Voice {request_id}: returning matched motion "
+                f"{invalid_motion.event_id} to normal fusion."
+            )
+            self._on_motion(invalid_motion)
         self._pump_stt()
+        self._pump_vlm()
+        self._pump_tts()
 
     def _promote_queued_locked(self) -> None:
         if self._active_stt_id is None and self._queued_stt_id is not None:
@@ -449,6 +607,14 @@ class MultimodalManager(Node):
     def _on_timer(self) -> None:
         self._pump_frame_requests()
         self._pump_stt()
+        with self._lock:
+            expired_held = self._scheduler.expire_held_response(time.monotonic_ns())
+        if expired_held is not None:
+            self.get_logger().warn(
+                f"Discarded expired held response from VLM task "
+                f"{expired_held.vlm_task_id}."
+            )
+        self._monitor_vlm_cancellation()
         self._pump_vlm()
         self._pump_tts()
         now_ns = time.monotonic_ns()
@@ -463,7 +629,12 @@ class MultimodalManager(Node):
                 fusion_ready = (
                     voice.motion is not None or now_ns >= voice.fusion_deadline_ns
                 )
-                if voice.stt_state == "done" and frame is not None and fusion_ready:
+                if (
+                    voice.stt_state == "done"
+                    and voice.transcript_usable
+                    and frame is not None
+                    and fusion_ready
+                ):
                     ready_voices.append((voice, frame))
                     self._voices.pop(request_id, None)
                     self._coordinator.complete_voice(request_id)
@@ -573,8 +744,8 @@ class MultimodalManager(Node):
 
     def _enqueue_vlm(self, payload: MultimodalEvent) -> None:
         now_ns = time.monotonic_ns()
-        if payload.event_type == "motion":
-            with self._lock:
+        with self._lock:
+            if payload.event_type == "motion":
                 if now_ns < self._next_motion_vlm_ns:
                     remaining_s = (self._next_motion_vlm_ns - now_ns) / 1_000_000_000
                     self.get_logger().info(
@@ -582,10 +753,20 @@ class MultimodalManager(Node):
                     )
                     return
                 self._next_motion_vlm_ns = now_ns + self._motion_vlm_cooldown_ns
-
-        priority = 1 if payload.event_type in {"voice", "voice_motion"} else 0
-        with self._lock:
-            outcome = self._vlm_queue.submit(payload, priority)
+            task_id = self._next_vlm_task_id
+            self._next_vlm_task_id += 1
+            pending_ttl_ns = (
+                self._pending_voice_ttl_ns
+                if payload.event_type in {"voice", "voice_motion"}
+                else self._pending_motion_ttl_ns
+            )
+            task = VlmTask(
+                vlm_task_id=task_id,
+                event_type=payload.event_type,
+                payload=payload,
+                deadline_ns=now_ns + pending_ttl_ns,
+            )
+            outcome = self._scheduler.submit(task)
         if not outcome.accepted:
             self.get_logger().info(
                 "Ignored pending motion VLM input because a voice input is waiting."
@@ -594,7 +775,7 @@ class MultimodalManager(Node):
         if outcome.replaced is not None:
             self.get_logger().warn(
                 f"Replaced pending {outcome.replaced.event_type} VLM input with "
-                f"newer {payload.event_type} input."
+                f"newer {payload.event_type} task {task_id}."
             )
         self._pump_vlm()
 
@@ -602,86 +783,382 @@ class MultimodalManager(Node):
         if self._mode != "vlm" or not self._vlm_client.server_is_ready():
             return
         with self._lock:
-            payload = self._vlm_queue.begin_next()
+            begin = self._scheduler.begin_next(time.monotonic_ns())
+        if begin.expired is not None:
+            self.get_logger().warn(
+                f"Discarded expired pending {begin.expired.event_type} VLM task "
+                f"{begin.expired.vlm_task_id}."
+            )
+            return
+        task = begin.task
+        if task is None:
+            return
+        payload = task.payload
         if payload is None:
+            self.get_logger().error(
+                f"VLM task {task.vlm_task_id} has no payload; discarding it."
+            )
+            self._complete_vlm(task.vlm_task_id)
             return
 
         goal = RunVlm.Goal()
         goal.input = payload
         self.get_logger().info(
-            f"Sending {payload.event_type} event to VLM (one selected frame)."
+            f"Dispatching VLM task {task.vlm_task_id}: "
+            f"{payload.event_type}, one selected frame."
         )
         try:
             future = self._vlm_client.send_goal_async(goal)
             future.add_done_callback(
-                lambda completed, event_type=payload.event_type: self._on_vlm_goal(
-                    event_type, completed
+                lambda completed, task_id=task.vlm_task_id: self._on_vlm_goal(
+                    task_id, completed
                 )
             )
         except Exception as exc:
-            self.get_logger().error(f"Failed to send VLM goal: {exc}")
-            self._complete_vlm()
+            self.get_logger().error(
+                f"Failed to send VLM task {task.vlm_task_id}: {exc}"
+            )
+            self._complete_vlm(task.vlm_task_id)
 
-    def _on_vlm_goal(self, event_type: str, future) -> None:
+    def _on_vlm_goal(self, vlm_task_id: int, future) -> None:
         try:
             goal_handle = future.result()
         except Exception as exc:
-            self.get_logger().error(f"VLM goal error: {exc}")
-            self._complete_vlm()
+            self.get_logger().error(f"VLM task {vlm_task_id} goal error: {exc}")
+            self._complete_vlm(vlm_task_id)
             return
         if goal_handle is None or not goal_handle.accepted:
-            self.get_logger().warn("VLM goal was rejected.")
-            self._complete_vlm()
+            self.get_logger().warn(f"VLM task {vlm_task_id} was rejected.")
+            self._complete_vlm(vlm_task_id)
             return
+        with self._lock:
+            became_active = self._scheduler.mark_active(vlm_task_id, goal_handle)
+            task = self._scheduler.active_task
+            event_type = task.event_type if became_active and task is not None else ""
+            cancel_dispatch = (
+                self._scheduler.take_cancellation_dispatch()
+                if became_active
+                else None
+            )
+        if not became_active:
+            self.get_logger().warn(
+                f"Ignoring accepted goal callback for stale VLM task {vlm_task_id}."
+            )
+            self._dispatch_vlm_cancel(
+                CancellationDispatch(vlm_task_id, goal_handle)
+            )
+            return
+        if cancel_dispatch is not None:
+            self.get_logger().info(
+                f"VLM task {vlm_task_id} was cancelled while dispatching; "
+                "sending cancellation now that its goal handle is available."
+            )
+            self._dispatch_vlm_cancel(cancel_dispatch)
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(
-            lambda completed, event_type=event_type: self._on_vlm_result(
-                event_type, completed
+            lambda completed, task_id=vlm_task_id, kind=event_type: self._on_vlm_result(
+                task_id, kind, completed
             )
         )
 
-    def _on_vlm_result(self, event_type: str, future) -> None:
+    def _on_vlm_result(self, vlm_task_id: int, event_type: str, future) -> None:
         try:
             response = future.result()
             result = response.result
-            if response.status != GoalStatus.STATUS_SUCCEEDED or not result.success:
-                raise RuntimeError(result.error_message or f"status {response.status}")
-            decision = speech_from_vlm_response(result.response_text, event_type)
-            self._vlm_response_pub.publish(String(data=result.response_text))
-            self.get_logger().info(
-                f"VLM decision={decision.decision}, should_speak={decision.should_speak}."
-            )
-            if decision.should_speak:
-                self._enqueue_tts(decision.speech)
         except Exception as exc:
-            self.get_logger().error(f"VLM result failed: {exc}")
-        finally:
-            self._complete_vlm()
+            self.get_logger().error(f"VLM task {vlm_task_id} result failed: {exc}")
+            self._complete_vlm(vlm_task_id)
+            return
 
-    def _complete_vlm(self) -> None:
+        if response.status != GoalStatus.STATUS_SUCCEEDED or not result.success:
+            with self._lock:
+                active = self._scheduler.active_task
+                owns_active = bool(
+                    active is not None and active.vlm_task_id == vlm_task_id
+                )
+                cancellation_expected = bool(
+                    owns_active
+                    and active is not None
+                    and active.state == VlmTaskState.CANCEL_REQUESTED
+                )
+                completed = (
+                    self._scheduler.complete(vlm_task_id)
+                    if owns_active
+                    else None
+                )
+                recovered_from_degraded = (
+                    self._clear_cancel_diagnostic_locked(vlm_task_id)
+                    if completed is not None
+                    else False
+                )
+            if not owns_active:
+                self.get_logger().warn(
+                    f"Ignoring terminal result for stale VLM task {vlm_task_id}."
+                )
+                return
+            message = result.error_message or f"status {response.status}"
+            if cancellation_expected or response.status == GoalStatus.STATUS_CANCELED:
+                self.get_logger().info(
+                    f"VLM task {vlm_task_id} reached cancelled terminal state: "
+                    f"{message}."
+                )
+            else:
+                self.get_logger().error(
+                    f"VLM task {vlm_task_id} result failed: {message}"
+                )
+            if recovered_from_degraded:
+                self._publish_scheduler_status("ready", vlm_task_id)
+            self._pump_vlm()
+            return
+
+        try:
+            decision = speech_from_vlm_response(result.response_text, event_type)
+        except Exception as exc:
+            self.get_logger().error(
+                f"VLM task {vlm_task_id} response policy failed: {exc}"
+            )
+            self._complete_vlm(vlm_task_id)
+            return
+
+        held = None
+        tts_outcome = None
+        recovered_from_degraded = False
+        now_ns = time.monotonic_ns()
         with self._lock:
-            if self._vlm_queue.active:
-                self._vlm_queue.complete()
+            active = self._scheduler.active_task
+            owns_active = bool(
+                active is not None and active.vlm_task_id == vlm_task_id
+            )
+            if not self._scheduler.result_is_current(vlm_task_id, now_ns):
+                current = False
+            else:
+                current = True
+                if decision.should_speak:
+                    if self._scheduler.stt_unresolved:
+                        held = self._scheduler.hold_response(
+                            vlm_task_id,
+                            decision.speech,
+                            time.monotonic_ns(),
+                        )
+                    else:
+                        tts_outcome = self._tts_queue.submit(
+                            PendingSpeech(vlm_task_id, decision.speech)
+                        )
+            if owns_active:
+                self._scheduler.complete(vlm_task_id)
+                recovered_from_degraded = self._clear_cancel_diagnostic_locked(
+                    vlm_task_id
+                )
+
+        if not owns_active:
+            self.get_logger().warn(
+                f"Discarding stale result callback for VLM task {vlm_task_id}."
+            )
+            return
+        if recovered_from_degraded:
+            self._publish_scheduler_status("ready", vlm_task_id)
+        if not current:
+            self.get_logger().warn(
+                f"Discarded cancelled or expired result from VLM task "
+                f"{vlm_task_id}."
+            )
+            self._pump_vlm()
+            self._pump_tts()
+            return
+
+        self._vlm_response_pub.publish(String(data=result.response_text))
+        self.get_logger().info(
+            f"VLM task {vlm_task_id}: decision={decision.decision}, "
+            f"should_speak={decision.should_speak}."
+        )
+        if held is not None:
+            self.get_logger().info(
+                f"Held response from VLM task {vlm_task_id} while STT for voice "
+                f"{held.held.voice_id} is unresolved."
+            )
+            if held.replaced is not None:
+                self.get_logger().warn(
+                    f"Held response from VLM task {held.replaced.vlm_task_id} was "
+                    f"replaced by newer task {vlm_task_id}."
+                )
+        if tts_outcome is not None and tts_outcome.replaced is not None:
+            self.get_logger().warn(
+                f"Replaced pending TTS response from VLM task "
+                f"{tts_outcome.replaced.vlm_task_id} with task {vlm_task_id}."
+            )
+        self._pump_vlm()
+        self._pump_tts()
+
+    def _complete_vlm(self, vlm_task_id: int) -> None:
+        with self._lock:
+            completed = self._scheduler.complete(vlm_task_id)
+            recovered_from_degraded = (
+                self._clear_cancel_diagnostic_locked(vlm_task_id)
+                if completed is not None
+                else False
+            )
+        if completed is None:
+            self.get_logger().warn(
+                f"Late completion for VLM task {vlm_task_id} did not own active state."
+            )
+        elif recovered_from_degraded:
+            self._publish_scheduler_status("ready", vlm_task_id)
         self._pump_vlm()
 
-    def _enqueue_tts(self, speech: str) -> None:
+    def _start_cancel_diagnostic_locked(
+        self,
+        vlm_task_id: int,
+        now_ns: int,
+    ) -> None:
+        self._cancel_task_id = vlm_task_id
+        self._cancel_started_ns = now_ns
+        self._cancel_degraded = False
+        self._next_cancel_warning_ns = now_ns + self._vlm_cancel_grace_ns
+
+    def _clear_cancel_diagnostic_locked(self, vlm_task_id: int) -> bool:
+        if self._cancel_task_id != vlm_task_id:
+            return False
+        was_degraded = self._cancel_degraded
+        self._cancel_task_id = None
+        self._cancel_started_ns = 0
+        self._cancel_degraded = False
+        self._next_cancel_warning_ns = 0
+        return was_degraded
+
+    def _monitor_vlm_cancellation(self) -> None:
+        now_ns = time.monotonic_ns()
+        timeout_task_id = None
+        degraded_task_id = None
+        publish_degraded = False
         with self._lock:
-            outcome = self._tts_queue.submit(speech)
+            transition = self._scheduler.request_cancel_if_expired(now_ns)
+            if transition.newly_requested and transition.task is not None:
+                timeout_task_id = transition.task.vlm_task_id
+                self._start_cancel_diagnostic_locked(timeout_task_id, now_ns)
+            cancel_dispatch = self._scheduler.take_cancellation_dispatch()
+            active = self._scheduler.active_task
+            if (
+                active is not None
+                and active.state == VlmTaskState.CANCEL_REQUESTED
+                and self._cancel_task_id == active.vlm_task_id
+                and now_ns - self._cancel_started_ns >= self._vlm_cancel_grace_ns
+                and now_ns >= self._next_cancel_warning_ns
+            ):
+                degraded_task_id = active.vlm_task_id
+                publish_degraded = not self._cancel_degraded
+                self._cancel_degraded = True
+                self._next_cancel_warning_ns = now_ns + self._vlm_cancel_grace_ns
+
+        if timeout_task_id is not None:
+            self.get_logger().warn(
+                f"VLM task {timeout_task_id} exceeded the active inference "
+                "deadline; requesting cooperative cancellation."
+            )
+        if cancel_dispatch is not None:
+            self._dispatch_vlm_cancel(cancel_dispatch)
+        if degraded_task_id is not None:
+            self.get_logger().error(
+                f"VLM task {degraded_task_id} has exceeded the cancellation "
+                "grace period; scheduler is degraded and will not start another "
+                "generation until the old task becomes terminal."
+            )
+            if publish_degraded:
+                self._publish_scheduler_status(
+                    "degraded_cancellation",
+                    degraded_task_id,
+                )
+
+    def _dispatch_vlm_cancel(self, dispatch: CancellationDispatch) -> None:
+        try:
+            future = dispatch.goal_handle.cancel_goal_async()
+            future.add_done_callback(
+                lambda completed, task_id=dispatch.vlm_task_id: (
+                    self._on_vlm_cancel_response(task_id, completed)
+                )
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                f"Could not send cancellation for VLM task "
+                f"{dispatch.vlm_task_id}: {exc}. The active slot remains occupied."
+            )
+
+    def _on_vlm_cancel_response(self, vlm_task_id: int, future) -> None:
+        try:
+            response = future.result()
+            accepted = bool(response.goals_canceling)
+        except Exception as exc:
+            self.get_logger().error(
+                f"VLM task {vlm_task_id} cancellation response failed: {exc}. "
+                "The active slot remains occupied."
+            )
+            return
+        if accepted:
+            self.get_logger().info(
+                f"VLM task {vlm_task_id} cancellation was accepted; waiting for "
+                "terminal cleanup."
+            )
+        else:
+            self.get_logger().warn(
+                f"VLM task {vlm_task_id} cancellation was not accepted; waiting "
+                "for its normal terminal result."
+            )
+
+    def _publish_scheduler_status(self, state: str, vlm_task_id: int) -> None:
+        status = json.dumps(
+            {"state": state, "vlm_task_id": vlm_task_id},
+            ensure_ascii=False,
+        )
+        self._scheduler_status_pub.publish(String(data=status))
+
+    def _enqueue_tts(self, speech: str, vlm_task_id: int) -> None:
+        held = None
+        with self._lock:
+            if self._scheduler.stt_unresolved:
+                held = self._scheduler.hold_response(
+                    vlm_task_id,
+                    speech,
+                    time.monotonic_ns(),
+                )
+                outcome = None
+            else:
+                outcome = self._tts_queue.submit(
+                    PendingSpeech(vlm_task_id=vlm_task_id, speech=speech)
+                )
+        if held is not None:
+            self.get_logger().info(
+                f"Held response from VLM task {vlm_task_id} while STT for voice "
+                f"{held.held.voice_id} is unresolved."
+            )
+            if held.replaced is not None:
+                self.get_logger().warn(
+                    f"Held response from VLM task {held.replaced.vlm_task_id} was "
+                    f"replaced by newer task {vlm_task_id}."
+                )
+            return
+        assert outcome is not None
         if outcome.replaced is not None:
-            self.get_logger().warn("Replaced one pending TTS response with the newest response.")
+            self.get_logger().warn(
+                f"Replaced pending TTS response from VLM task "
+                f"{outcome.replaced.vlm_task_id} with task {vlm_task_id}."
+            )
         self._pump_tts()
 
     def _pump_tts(self) -> None:
         if self._mode != "vlm" or not self._tts_client.server_is_ready():
             return
         with self._lock:
-            speech = self._tts_queue.begin_next()
-        if speech is None:
+            if self._scheduler.stt_unresolved:
+                return
+            pending_speech = self._tts_queue.begin_next()
+        if pending_speech is None:
             return
 
         goal = TextToSpeech.Goal()
-        goal.text = speech
-        self.get_logger().info(f"Sending VLM speech to TTS: '{speech[:160]}'")
+        goal.text = pending_speech.speech
+        self.get_logger().info(
+            f"Sending speech from VLM task {pending_speech.vlm_task_id} to TTS: "
+            f"'{pending_speech.speech[:160]}'"
+        )
         try:
             future = self._tts_client.send_goal_async(goal)
             future.add_done_callback(self._on_tts_goal)

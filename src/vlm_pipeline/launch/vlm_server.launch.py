@@ -15,11 +15,12 @@ def generate_launch_description():
         DeclareLaunchArgument("device", default_value="auto"),
         DeclareLaunchArgument("dtype", default_value="auto"),
         DeclareLaunchArgument("quantization", default_value="none"),
-        DeclareLaunchArgument("max_new_tokens", default_value="128"),
+        DeclareLaunchArgument("max_new_tokens", default_value="48"),
         DeclareLaunchArgument("trust_remote_code", default_value="false"),
         DeclareLaunchArgument("local_files_only", default_value="false"),
         DeclareLaunchArgument("prompt_profile", default_value="companion_robot_v1"),
         DeclareLaunchArgument("prompt_directory", default_value=""),
+        DeclareLaunchArgument("do_image_splitting", default_value="false"),
         Node(
             package="vlm_pipeline",
             executable="vlm_node",
@@ -56,6 +57,9 @@ def generate_launch_description():
                 ),
                 "prompt_directory": ParameterValue(
                     LaunchConfiguration("prompt_directory"), value_type=str
+                ),
+                "do_image_splitting": ParameterValue(
+                    LaunchConfiguration("do_image_splitting"), value_type=bool
                 ),
             }],
         ),

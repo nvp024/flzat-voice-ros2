@@ -43,6 +43,15 @@ class LatestPriorityWorkQueue(Generic[T]):
         self._active = True
         return item
 
+    def take_pending(self) -> Optional[T]:
+        """Remove pending, not-yet-active work without affecting active work."""
+
+        if self._pending is None:
+            return None
+        _, item = self._pending
+        self._pending = None
+        return item
+
     def complete(self) -> None:
         if not self._active:
             raise RuntimeError("Cannot complete work when no item is active")

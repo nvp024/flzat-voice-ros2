@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from typing import Optional
 
@@ -14,7 +15,12 @@ from std_msgs.msg import String
 
 from robot_interfaces.action import RunVlm
 from vlm_pipeline.backends import available_backends, create_backend
-from vlm_pipeline.backends.base import BackendConfig, GenerationRequest
+from vlm_pipeline.backends.base import (
+    BackendConfig,
+    GenerationCancelled,
+    GenerationRequest,
+)
+from vlm_pipeline.cancellation import GoalCancellationRegistry
 from vlm_pipeline.image_io import decode_compressed_images
 from vlm_pipeline.job_gate import VlmJobGate
 from vlm_pipeline.prompting import PromptBuilder
@@ -27,6 +33,7 @@ class VlmNode(Node):
         super().__init__("vlm_node")
         self._callback_group = ReentrantCallbackGroup()
         self._job_gate = VlmJobGate()
+        self._cancel_tokens = GoalCancellationRegistry()
         self._declare_parameters()
 
         backend_name = self._string_parameter("backend")
@@ -65,6 +72,7 @@ class VlmNode(Node):
             quantization=self._string_parameter("quantization"),
             trust_remote_code=self._boolean_parameter("trust_remote_code"),
             local_files_only=self._boolean_parameter("local_files_only"),
+            do_image_splitting=self._boolean_parameter("do_image_splitting"),
         )
         self.get_logger().info(
             f"Loading VLM: backend={backend_name}, model={model_id}, "
@@ -107,11 +115,12 @@ class VlmNode(Node):
         self.declare_parameter("device", "auto")
         self.declare_parameter("dtype", "auto")
         self.declare_parameter("quantization", "none")
-        self.declare_parameter("max_new_tokens", 128)
+        self.declare_parameter("max_new_tokens", 48)
         self.declare_parameter("max_input_bytes", 10_000_000)
         self.declare_parameter("max_image_pixels", 16_000_000)
         self.declare_parameter("trust_remote_code", False)
         self.declare_parameter("local_files_only", False)
+        self.declare_parameter("do_image_splitting", False)
         self.declare_parameter("prompt_profile", "companion_robot_v1")
         self.declare_parameter("prompt_directory", "")
         self.declare_parameter(
@@ -137,17 +146,37 @@ class VlmNode(Node):
             return GoalResponse.REJECT
         return GoalResponse.ACCEPT
 
-    def _on_cancel(self, _goal_handle) -> CancelResponse:
-        self.get_logger().info(
-            "VLM cancel requested; active generation will stop after model.generate returns."
-        )
+    def _on_cancel(self, goal_handle) -> CancelResponse:
+        token_found = self._cancel_tokens.request_cancel(goal_handle)
+        if token_found:
+            self.get_logger().info(
+                "VLM cancel requested; cooperative generation stop was signalled."
+            )
+        else:
+            self.get_logger().info(
+                "VLM cancel requested before execution registered its token; "
+                "the execute callback will observe the ROS cancel state."
+            )
         return CancelResponse.ACCEPT
 
     def _execute(self, goal_handle):
         result = RunVlm.Result()
         images = ()
         inference_started = 0.0
+        cancel_token = threading.Event()
+        token_registered = False
         try:
+            self._cancel_tokens.register(goal_handle, cancel_token)
+            token_registered = True
+            if goal_handle.is_cancel_requested:
+                cancel_token.set()
+            if self._is_cancelled(goal_handle, cancel_token):
+                return self._cancel_result(
+                    goal_handle,
+                    result,
+                    "before preprocessing",
+                )
+
             payload = goal_handle.request.input
             prompts = self._prompt_builder.build(
                 payload.event_type,
@@ -155,17 +184,24 @@ class VlmNode(Node):
                 payload.trigger_reason,
                 self._default_prompt,
             )
+            if self._is_cancelled(goal_handle, cancel_token):
+                return self._cancel_result(
+                    goal_handle,
+                    result,
+                    "before image decoding",
+                )
             self._publish_feedback(goal_handle, "decoding_image")
             images = decode_compressed_images(
                 list(payload.frames),
                 self._max_input_bytes,
                 self._max_image_pixels,
             )
-            if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-                result.success = False
-                result.error_message = "VLM request cancelled before inference"
-                return result
+            if self._is_cancelled(goal_handle, cancel_token):
+                return self._cancel_result(
+                    goal_handle,
+                    result,
+                    "before inference",
+                )
 
             image = images[0]
             image_bytes = len(payload.frames[0].data)
@@ -185,20 +221,28 @@ class VlmNode(Node):
                     system_prompt=prompts.system_prompt,
                     user_prompt=prompts.user_prompt,
                     max_new_tokens=self._max_new_tokens,
+                    cancel_event=cancel_token,
                 )
             )
             inference_s = time.perf_counter() - inference_started
-            self._raw_response_pub.publish(String(data=raw_response))
+            if self._is_cancelled(goal_handle, cancel_token):
+                return self._cancel_result(
+                    goal_handle,
+                    result,
+                    "during inference",
+                )
             response = raw_response.strip()
-            if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-                result.success = False
-                result.error_message = "VLM request cancelled after inference"
-                return result
             if not response:
                 raise RuntimeError("VLM backend returned an empty response")
+            if self._is_cancelled(goal_handle, cancel_token):
+                return self._cancel_result(
+                    goal_handle,
+                    result,
+                    "before response publication",
+                )
 
             self._publish_feedback(goal_handle, "inference_complete")
+            self._raw_response_pub.publish(String(data=response))
             result.success = True
             result.response_text = response
             result.error_message = ""
@@ -207,7 +251,16 @@ class VlmNode(Node):
                 f"VLM response ({inference_s:.2f} s): '{response[:500]}'"
             )
             return result
+        except GenerationCancelled as exc:
+            cancel_token.set()
+            return self._cancel_result(goal_handle, result, str(exc))
         except Exception as exc:
+            if self._is_cancelled(goal_handle, cancel_token):
+                return self._cancel_result(
+                    goal_handle,
+                    result,
+                    "during error handling",
+                )
             elapsed = (
                 time.perf_counter() - inference_started
                 if inference_started > 0.0
@@ -224,7 +277,23 @@ class VlmNode(Node):
         finally:
             for image in images:
                 image.close()
+            if token_registered:
+                self._cancel_tokens.unregister(goal_handle, cancel_token)
             self._job_gate.release()
+
+    @staticmethod
+    def _is_cancelled(goal_handle, token: threading.Event) -> bool:
+        if goal_handle.is_cancel_requested:
+            token.set()
+        return token.is_set()
+
+    def _cancel_result(self, goal_handle, result, phase: str):
+        goal_handle.canceled()
+        result.success = False
+        result.response_text = ""
+        result.error_message = f"VLM request cancelled {phase}"
+        self.get_logger().info(result.error_message)
+        return result
 
     @staticmethod
     def _publish_feedback(goal_handle, status: str) -> None:

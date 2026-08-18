@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from vlm_pipeline.backends.base import BackendConfig, GenerationRequest, VlmBackend
+from vlm_pipeline.backends.base import (
+    BackendConfig,
+    GenerationCancelled,
+    GenerationRequest,
+    VlmBackend,
+)
+from vlm_pipeline.cancellation import CancellationStoppingCriteria
 
 
 class SmolVlm2Backend(VlmBackend):
@@ -14,6 +20,7 @@ class SmolVlm2Backend(VlmBackend):
         self._processor: Any = None
         self._model: Any = None
         self._input_device: Any = None
+        self._stopping_criteria_list: Any = None
 
     @property
     def name(self) -> str:
@@ -29,7 +36,7 @@ class SmolVlm2Backend(VlmBackend):
         try:
             import torch
             import transformers
-            from transformers import AutoProcessor
+            from transformers import AutoProcessor, StoppingCriteriaList
         except ImportError as exc:
             raise RuntimeError(
                 "SmolVLM2 requires torch and transformers in the active "
@@ -46,6 +53,7 @@ class SmolVlm2Backend(VlmBackend):
             )
 
         self._torch = torch
+        self._stopping_criteria_list = StoppingCriteriaList
         target_device = self._resolve_device(torch)
         dtype = self._resolve_dtype(torch, target_device)
         load_options: dict[str, Any] = {
@@ -63,6 +71,9 @@ class SmolVlm2Backend(VlmBackend):
             trust_remote_code=self.config.trust_remote_code,
             local_files_only=self.config.local_files_only,
         )
+        if hasattr(self._processor, "image_processor"):
+            self._processor.image_processor.do_image_splitting = self.config.do_image_splitting
+
         try:
             model = model_class.from_pretrained(
                 self.config.model_id,
@@ -104,6 +115,7 @@ class SmolVlm2Backend(VlmBackend):
         user_prompt = request.user_prompt.strip()
         if not system_prompt or not user_prompt:
             raise ValueError("System and user prompts cannot be empty")
+        self._raise_if_cancelled(request)
 
         content = [
             {"type": "image", "image": image}
@@ -147,22 +159,46 @@ class SmolVlm2Backend(VlmBackend):
                 return_tensors="pt",
             )
 
-        inputs = inputs.to(self._input_device)
-        input_length = inputs["input_ids"].shape[-1]
-        with self._torch.inference_mode():
-            output_ids = self._model.generate(
-                **inputs,
-                max_new_tokens=request.max_new_tokens,
-                do_sample=False,
-            )
-        generated_ids = output_ids[:, input_length:]
-        response = self._processor.batch_decode(
-            generated_ids,
-            skip_special_tokens=True,
-        )[0].strip()
-        if not response:
-            raise RuntimeError("SmolVLM2 returned an empty response")
-        return response
+        self._raise_if_cancelled(request)
+        output_ids = None
+        generated_ids = None
+        try:
+            inputs = inputs.to(self._input_device)
+            input_length = inputs["input_ids"].shape[-1]
+            generation_options: dict[str, Any] = {
+                "max_new_tokens": request.max_new_tokens,
+                "do_sample": False,
+            }
+            if request.cancel_event is not None:
+                generation_options["stopping_criteria"] = (
+                    self._stopping_criteria_list([
+                        CancellationStoppingCriteria(request.cancel_event)
+                    ])
+                )
+            self._raise_if_cancelled(request)
+            with self._torch.inference_mode():
+                output_ids = self._model.generate(
+                    **inputs,
+                    **generation_options,
+                )
+            self._raise_if_cancelled(request)
+            generated_ids = output_ids[:, input_length:]
+            response = self._processor.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+            )[0].strip()
+            if not response:
+                raise RuntimeError("SmolVLM2 returned an empty response")
+            return response
+        finally:
+            del generated_ids
+            del output_ids
+            del inputs
+
+    @staticmethod
+    def _raise_if_cancelled(request: GenerationRequest) -> None:
+        if request.cancel_event is not None and request.cancel_event.is_set():
+            raise GenerationCancelled("SmolVLM2 generation was cancelled")
 
     def _resolve_device(self, torch) -> str:
         requested = self.config.device.strip().lower()

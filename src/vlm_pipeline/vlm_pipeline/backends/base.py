@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from threading import Event
 from typing import Any
+
+
+class GenerationCancelled(RuntimeError):
+    """Raised when cooperative cancellation stops one backend generation."""
 
 
 @dataclass(frozen=True)
@@ -15,7 +20,7 @@ class BackendConfig:
     quantization: str = "none"
     trust_remote_code: bool = False
     local_files_only: bool = False
-
+    do_image_splitting: bool = False
 
 @dataclass(frozen=True)
 class GenerationRequest:
@@ -25,6 +30,7 @@ class GenerationRequest:
     system_prompt: str
     user_prompt: str
     max_new_tokens: int
+    cancel_event: Event | None = None
 
 
 class VlmBackend(ABC):
