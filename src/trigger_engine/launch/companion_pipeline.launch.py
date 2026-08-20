@@ -66,6 +66,7 @@ def generate_launch_description():
         DeclareLaunchArgument("motion_hold_s", default_value="0.7"),
         DeclareLaunchArgument("voice_fusion_wait_s", default_value="0.8"),
         DeclareLaunchArgument("overlap_tolerance_s", default_value="0.25"),
+        DeclareLaunchArgument("voice_visual_after_s", default_value="0.75"),
         DeclareLaunchArgument("motion_vlm_cooldown_s", default_value="5.0"),
         DeclareLaunchArgument("held_response_ttl_s", default_value="10.0"),
         DeclareLaunchArgument("pending_motion_ttl_s", default_value="3.0"),
@@ -135,6 +136,9 @@ def generate_launch_description():
                 ),
                 "overlap_tolerance_s": ParameterValue(
                     LaunchConfiguration("overlap_tolerance_s"), value_type=float
+                ),
+                "voice_visual_after_s": ParameterValue(
+                    LaunchConfiguration("voice_visual_after_s"), value_type=float
                 ),
                 "motion_vlm_cooldown_s": ParameterValue(
                     LaunchConfiguration("motion_vlm_cooldown_s"), value_type=float

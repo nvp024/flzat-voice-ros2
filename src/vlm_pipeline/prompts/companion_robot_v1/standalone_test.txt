@@ -1,5 +1,3 @@
-EVENT_TYPE: __EVENT_TYPE_JSON__
-TRIGGER_REASON: __TRIGGER_REASON_JSON__
-HUMAN_COMMAND: __HUMAN_COMMAND_JSON__
+Test request: __HUMAN_COMMAND_JSON__
 
-This is a static integration test. Use the image to answer the test request briefly while following the companion-robot role.
+Answer the request using the image in one short sentence.

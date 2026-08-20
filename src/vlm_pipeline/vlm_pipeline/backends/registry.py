@@ -7,6 +7,7 @@ from vlm_pipeline.backends.base import BackendConfig, VlmBackend
 
 
 _BACKENDS = {
+    "qwen2_vl": "vlm_pipeline.backends.qwen2_vl:Qwen2VlBackend",
     "smolvlm2": "vlm_pipeline.backends.smolvlm2:SmolVlm2Backend",
 }
 

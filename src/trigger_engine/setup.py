@@ -25,6 +25,7 @@ setup(
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
+            "multimodal_log_viewer = trigger_engine.multimodal_log_viewer:main",
             "multimodal_manager = trigger_engine.multimodal_manager:main",
         ],
     },

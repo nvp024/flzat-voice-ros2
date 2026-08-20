@@ -50,6 +50,7 @@ def generate_launch_description():
         DeclareLaunchArgument("motion_hold_s", default_value="0.7"),
         DeclareLaunchArgument("voice_fusion_wait_s", default_value="0.8"),
         DeclareLaunchArgument("overlap_tolerance_s", default_value="0.25"),
+        DeclareLaunchArgument("voice_visual_after_s", default_value="0.75"),
         vision_launch,
         Node(
             package="audio_pipeline",
@@ -91,6 +92,9 @@ def generate_launch_description():
                 ),
                 "overlap_tolerance_s": ParameterValue(
                     LaunchConfiguration("overlap_tolerance_s"), value_type=float
+                ),
+                "voice_visual_after_s": ParameterValue(
+                    LaunchConfiguration("voice_visual_after_s"), value_type=float
                 ),
             }],
         ),

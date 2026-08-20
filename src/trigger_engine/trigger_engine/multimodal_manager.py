@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import cv2
@@ -29,6 +29,12 @@ from trigger_engine.fusion import (
     MotionWindow,
     VoiceWindow,
 )
+from trigger_engine.frame_selection import (
+    FrameCandidate,
+    FrameSelection,
+    relevance_window_end_ns,
+    select_relevant_frame,
+)
 from trigger_engine.output_policy import speech_from_vlm_response
 from trigger_engine.scheduler import (
     CancellationDispatch,
@@ -45,6 +51,22 @@ def _stamp_to_ns(stamp: Time) -> int:
     return stamp.sec * 1_000_000_000 + stamp.nanosec
 
 
+def _time_from_ns(stamp_ns: int) -> Time:
+    stamp = Time()
+    stamp.sec = stamp_ns // 1_000_000_000
+    stamp.nanosec = stamp_ns % 1_000_000_000
+    return stamp
+
+
+@dataclass
+class FrameRequestSlot:
+    frame: Optional[CompressedImage] = None
+    requested: bool = False
+    request_started_ns: int = 0
+    done: bool = False
+    error: str = ""
+
+
 @dataclass
 class VoiceRequest:
     request_id: int
@@ -57,11 +79,10 @@ class VoiceRequest:
     transcript: str = ""
     transcript_usable: bool = False
     stt_error: str = ""
-    frame: Optional[CompressedImage] = None
-    frame_requested: bool = False
-    frame_request_started_ns: int = 0
-    frame_done: bool = False
-    frame_error: str = ""
+    stt_result_ns: int = 0
+    stt_completed_ns: int = 0
+    baseline: FrameRequestSlot = field(default_factory=FrameRequestSlot)
+    refreshed: FrameRequestSlot = field(default_factory=FrameRequestSlot)
     motion: Optional[VisualEvent] = None
 
 
@@ -89,6 +110,12 @@ class MultimodalManager(Node):
         self._frame_before_s = self._positive_parameter("frame_before_s")
         self._frame_after_s = self._positive_parameter(
             "frame_after_s", allow_zero=True
+        )
+        self._voice_visual_after_ns = int(
+            self._positive_parameter(
+                "voice_visual_after_s",
+                allow_zero=True,
+            ) * 1_000_000_000
         )
         self._frame_timeout_ns = int(
             self._positive_parameter("frame_timeout_s") * 1_000_000_000
@@ -233,6 +260,7 @@ class MultimodalManager(Node):
         self.declare_parameter("overlap_tolerance_s", 0.25)
         self.declare_parameter("frame_before_s", 2.0)
         self.declare_parameter("frame_after_s", 0.1)
+        self.declare_parameter("voice_visual_after_s", 0.75)
         self.declare_parameter("frame_timeout_s", 2.0)
         self.declare_parameter("stt_server_timeout_s", 10.0)
         self.declare_parameter("motion_vlm_cooldown_s", 5.0)
@@ -331,7 +359,7 @@ class MultimodalManager(Node):
                 released_from_replaced.speech,
                 released_from_replaced.vlm_task_id,
             )
-        self._request_frame(request_id)
+        self._request_frame(request_id, "baseline")
         self._pump_stt()
 
     def _on_motion(self, event: VisualEvent) -> None:
@@ -340,6 +368,12 @@ class MultimodalManager(Node):
                 f"Ignoring motion event {event.event_id} without a frame."
             )
             return
+        if len(event.frames) > 1:
+            event.frames = [event.frames[0]]
+            self.get_logger().warn(
+                f"Motion event {event.event_id} contained multiple frames; "
+                "retained only the first bounded candidate."
+            )
         start_ns = _stamp_to_ns(event.motion_start)
         end_ns = _stamp_to_ns(event.motion_end)
         if start_ns == 0 or end_ns == 0:
@@ -379,58 +413,95 @@ class MultimodalManager(Node):
                 f"Motion {event.event_id} held for voice fusion."
             )
 
-    def _request_frame(self, request_id: int) -> None:
+    @staticmethod
+    def _frame_slot(voice: VoiceRequest, source: str) -> FrameRequestSlot:
+        if source == "baseline":
+            return voice.baseline
+        if source == "refreshed":
+            return voice.refreshed
+        raise ValueError(f"Unknown voice frame source: {source}")
+
+    def _request_frame(self, request_id: int, source: str) -> None:
         if not self._frame_client.service_is_ready():
             return
         with self._lock:
             voice = self._voices.get(request_id)
-            if voice is None or voice.frame_done or voice.frame_requested:
+            if voice is None:
                 return
-            voice.frame_requested = True
-            voice.frame_request_started_ns = time.monotonic_ns()
+            slot = self._frame_slot(voice, source)
+            if slot.done or slot.requested:
+                return
+            if source == "refreshed" and voice.stt_result_ns <= 0:
+                return
+            slot.requested = True
+            slot.request_started_ns = time.monotonic_ns()
+            target_ns = (
+                voice.end_ns
+                if source == "baseline"
+                else relevance_window_end_ns(
+                    voice.end_ns,
+                    voice.stt_result_ns,
+                    self._voice_visual_after_ns,
+                )
+            )
             request = GetFramesAround.Request()
-            request.target_stamp = voice.audio.header.stamp
+            request.target_stamp = _time_from_ns(target_ns)
             request.before_s = self._frame_before_s
-            request.after_s = self._frame_after_s
+            request.after_s = self._frame_after_s if source == "baseline" else 0.0
             request.max_frames = 1
         try:
             future = self._frame_client.call_async(request)
             future.add_done_callback(
-                lambda completed, request_id=request_id: self._on_frame_result(
-                    request_id, completed
+                lambda completed, request_id=request_id, source=source: (
+                    self._on_frame_result(request_id, source, completed)
                 )
             )
         except Exception as exc:
             with self._lock:
                 voice = self._voices.get(request_id)
                 if voice is not None:
-                    voice.frame_requested = False
+                    self._frame_slot(voice, source).requested = False
             self.get_logger().error(
-                f"Voice {request_id}: frame request failed to send: {exc}"
+                f"Voice {request_id}: {source} frame request failed to send: {exc}"
             )
 
-    def _on_frame_result(self, request_id: int, future) -> None:
+    def _on_frame_result(self, request_id: int, source: str, future) -> None:
         response = None
         error = ""
         try:
             response = future.result()
         except Exception as exc:
             error = str(exc)
+        selected_frame = None
+        frame_error = ""
         with self._lock:
             voice = self._voices.get(request_id)
-            if voice is None or voice.frame_done:
+            if voice is None:
+                self.get_logger().debug(
+                    f"Ignoring stale {source} frame callback for voice {request_id}."
+                )
                 return
-            voice.frame_requested = False
-            voice.frame_done = True
+            slot = self._frame_slot(voice, source)
+            if slot.done:
+                return
+            slot.requested = False
+            slot.done = True
             if response is not None and response.success and response.frames:
-                voice.frame = response.frames[0]
+                slot.frame = response.frames[0]
+                selected_frame = slot.frame
             else:
-                voice.frame_error = error or (
+                slot.error = error or (
                     response.message if response is not None else "unknown service error"
                 )
-        if voice.frame is None:
+                frame_error = slot.error
+        if selected_frame is not None:
+            self.get_logger().info(
+                f"Voice {request_id}: {source} candidate timestamp="
+                f"{self._format_ns(_stamp_to_ns(selected_frame.header.stamp))}."
+            )
+        else:
             self.get_logger().warn(
-                f"Voice {request_id}: no synchronized frame: {voice.frame_error}"
+                f"Voice {request_id}: no {source} frame candidate: {frame_error}"
             )
 
     def _pump_stt(self) -> None:
@@ -506,6 +577,7 @@ class MultimodalManager(Node):
 
     def _finish_stt(self, request_id: int, transcript: str, error: str) -> None:
         now_ns = time.monotonic_ns()
+        stt_result_ns = self.get_clock().now().nanoseconds
         released: Optional[HeldResponse] = None
         discarded: Optional[HeldResponse] = None
         invalid_motion: Optional[VisualEvent] = None
@@ -523,6 +595,8 @@ class MultimodalManager(Node):
             voice.transcript = transcript
             voice.transcript_usable = usable
             voice.stt_error = error
+            voice.stt_result_ns = stt_result_ns
+            voice.stt_completed_ns = now_ns
             resolution = self._scheduler.resolve_voice(
                 request_id,
                 usable=usable,
@@ -595,6 +669,8 @@ class MultimodalManager(Node):
                 f"{invalid_motion.event_id} to normal fusion."
             )
             self._on_motion(invalid_motion)
+        if usable:
+            self._request_frame(request_id, "refreshed")
         self._pump_stt()
         self._pump_vlm()
         self._pump_tts()
@@ -618,53 +694,70 @@ class MultimodalManager(Node):
         self._pump_vlm()
         self._pump_tts()
         now_ns = time.monotonic_ns()
-        ready_voices: list[tuple[VoiceRequest, CompressedImage]] = []
-        dropped_voices: list[VoiceRequest] = []
+        ready_voices: list[
+            tuple[VoiceRequest, FrameSelection[CompressedImage]]
+        ] = []
+        dropped_voices: list[
+            tuple[VoiceRequest, FrameSelection[CompressedImage]]
+        ] = []
         motion: Optional[MotionWindow]
 
         with self._lock:
             motion = self._coordinator.take_due_motion(now_ns)
             for request_id, voice in list(self._voices.items()):
-                frame = self._selected_frame(voice)
+                selection = self._select_voice_frame(voice)
                 fusion_ready = (
                     voice.motion is not None or now_ns >= voice.fusion_deadline_ns
                 )
+                candidates_done = voice.baseline.done and voice.refreshed.done
                 if (
                     voice.stt_state == "done"
                     and voice.transcript_usable
-                    and frame is not None
+                    and candidates_done
+                    and selection.selected is not None
                     and fusion_ready
                 ):
-                    ready_voices.append((voice, frame))
+                    ready_voices.append((voice, selection))
                     self._voices.pop(request_id, None)
                     self._coordinator.complete_voice(request_id)
                 elif (
                     voice.stt_state == "done"
-                    and voice.frame_done
-                    and frame is None
+                    and voice.transcript_usable
+                    and candidates_done
+                    and selection.selected is None
                     and fusion_ready
                 ):
-                    dropped_voices.append(voice)
+                    dropped_voices.append((voice, selection))
                     self._voices.pop(request_id, None)
                     self._coordinator.complete_voice(request_id)
 
-        for voice, frame in ready_voices:
+        for voice, selection in ready_voices:
+            selected = selection.selected
+            assert selected is not None
             event_type = "voice_motion" if voice.motion is not None else "voice"
             reason = "speech_with_motion" if voice.motion is not None else "speech"
-            self._publish_event(
-                voice.audio.header.stamp,
-                event_type,
-                voice.transcript,
-                reason,
-                frame,
-                voice.start_ns,
-                voice.end_ns,
-            )
-        for voice in dropped_voices:
+            self._log_voice_frame_selection(voice, selection)
+            try:
+                self._publish_event(
+                    voice.audio.header.stamp,
+                    event_type,
+                    voice.transcript,
+                    reason,
+                    selected.frame,
+                    selected.source,
+                    voice.start_ns,
+                    voice.end_ns,
+                )
+            finally:
+                self._release_voice_frames(voice)
+        for voice, selection in dropped_voices:
+            self._log_voice_frame_selection(voice, selection)
             self.get_logger().error(
-                f"Voice {voice.request_id} dropped: no synchronized frame "
-                f"({voice.frame_error or 'frame unavailable'})."
+                f"Voice {voice.request_id} dropped: no relevant frame; "
+                f"baseline_error='{voice.baseline.error}', "
+                f"refreshed_error='{voice.refreshed.error}'."
             )
+            self._release_voice_frames(voice)
         if motion is not None:
             event = motion.payload
             if event is not None and event.frames:
@@ -674,37 +767,117 @@ class MultimodalManager(Node):
                     "",
                     event.trigger_reason or "scene_change",
                     event.frames[0],
+                    "motion",
                     motion.start_ns,
                     motion.end_ns,
                 )
 
     def _pump_frame_requests(self) -> None:
         now_ns = time.monotonic_ns()
-        request_ids: list[int] = []
+        requests: list[tuple[int, str]] = []
         with self._lock:
             for voice in self._voices.values():
-                if voice.motion is not None or voice.frame_done:
-                    continue
-                age_ns = now_ns - voice.received_ns
-                if voice.frame_requested:
-                    if now_ns - voice.frame_request_started_ns >= self._frame_timeout_ns:
-                        voice.frame_requested = False
-                        voice.frame_done = True
-                        voice.frame_error = "frame service timeout"
-                    continue
-                if age_ns >= self._frame_timeout_ns:
-                    voice.frame_done = True
-                    voice.frame_error = "frame service unavailable"
-                else:
-                    request_ids.append(voice.request_id)
-        for request_id in request_ids:
-            self._request_frame(request_id)
+                sources = [("baseline", voice.baseline, voice.received_ns)]
+                if voice.stt_state == "done" and voice.transcript_usable:
+                    sources.append(
+                        ("refreshed", voice.refreshed, voice.stt_completed_ns)
+                    )
+                for source, slot, eligible_since_ns in sources:
+                    if slot.done:
+                        continue
+                    if slot.requested:
+                        if (
+                            now_ns - slot.request_started_ns
+                            >= self._frame_timeout_ns
+                        ):
+                            slot.requested = False
+                            slot.done = True
+                            slot.error = "frame service timeout"
+                        continue
+                    if now_ns - eligible_since_ns >= self._frame_timeout_ns:
+                        slot.done = True
+                        slot.error = "frame service unavailable"
+                    else:
+                        requests.append((voice.request_id, source))
+        for request_id, source in requests:
+            self._request_frame(request_id, source)
+
+    def _select_voice_frame(
+        self,
+        voice: VoiceRequest,
+    ) -> FrameSelection[CompressedImage]:
+        candidates: list[FrameCandidate[CompressedImage]] = []
+        baseline = self._candidate_from_frame("baseline", voice.baseline.frame)
+        if baseline is not None:
+            candidates.append(baseline)
+        refreshed = self._candidate_from_frame("refreshed", voice.refreshed.frame)
+        if refreshed is not None:
+            candidates.append(refreshed)
+        motion_frame = (
+            voice.motion.frames[0]
+            if voice.motion is not None and voice.motion.frames
+            else None
+        )
+        motion = self._candidate_from_frame("motion", motion_frame)
+        if motion is not None:
+            candidates.append(motion)
+        window_end_ns = relevance_window_end_ns(
+            voice.end_ns,
+            voice.stt_result_ns,
+            self._voice_visual_after_ns,
+        ) if voice.stt_result_ns > 0 else voice.end_ns
+        return select_relevant_frame(
+            candidates,
+            baseline,
+            voice.start_ns,
+            window_end_ns,
+        )
 
     @staticmethod
-    def _selected_frame(voice: VoiceRequest) -> Optional[CompressedImage]:
-        if voice.motion is not None and voice.motion.frames:
-            return voice.motion.frames[0]
-        return voice.frame
+    def _candidate_from_frame(
+        source: str,
+        frame: Optional[CompressedImage],
+    ) -> Optional[FrameCandidate[CompressedImage]]:
+        if frame is None:
+            return None
+        return FrameCandidate(source, _stamp_to_ns(frame.header.stamp), frame)
+
+    def _log_voice_frame_selection(
+        self,
+        voice: VoiceRequest,
+        selection: FrameSelection[CompressedImage],
+    ) -> None:
+        def describe(frame: Optional[CompressedImage]) -> str:
+            if frame is None:
+                return "none"
+            return self._format_ns(_stamp_to_ns(frame.header.stamp))
+
+        motion_frame = (
+            voice.motion.frames[0]
+            if voice.motion is not None and voice.motion.frames
+            else None
+        )
+        selected = selection.selected
+        selected_text = (
+            f"{selected.source}@{self._format_ns(selected.stamp_ns)}"
+            if selected is not None
+            else "none"
+        )
+        self.get_logger().info(
+            f"Voice {voice.request_id} visual selection: window="
+            f"{self._format_ns(selection.window_start_ns)}.."
+            f"{self._format_ns(selection.window_end_ns)}, candidates="
+            f"baseline:{describe(voice.baseline.frame)}, "
+            f"refreshed:{describe(voice.refreshed.frame)}, "
+            f"motion:{describe(motion_frame)}, selected={selected_text}, "
+            f"baseline_fallback={selection.used_baseline_fallback}."
+        )
+
+    @staticmethod
+    def _release_voice_frames(voice: VoiceRequest) -> None:
+        voice.baseline.frame = None
+        voice.refreshed.frame = None
+        voice.motion = None
 
     def _publish_event(
         self,
@@ -713,6 +886,7 @@ class MultimodalManager(Node):
         transcript: str,
         trigger_reason: str,
         frame: CompressedImage,
+        frame_source: str,
         start_ns: int,
         end_ns: int,
     ) -> None:
@@ -732,6 +906,7 @@ class MultimodalManager(Node):
             "source_interval": [self._format_ns(start_ns), self._format_ns(end_ns)],
             "transcript": transcript,
             "frame_timestamp": self._format_ns(frame_ns),
+            "frame_source": frame_source,
             "frame_bytes": len(frame.data),
             "trigger_reason": trigger_reason,
         }

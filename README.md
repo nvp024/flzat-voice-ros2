@@ -2,8 +2,9 @@
 
 This workspace contains a V0.1 real-time companion robot pipeline combining
 microphone audio, camera images, a vision-language model (VLM), and speech
-output. Version 1.1 is being added incrementally; Parts 1 and 2 implement the
-usable-final-STT barrier, bounded scheduling, and cooperative VLM cancellation.
+output. Version 1.1 is being added incrementally; Parts 1–3 implement the
+usable-final-STT barrier, cooperative VLM cancellation, and relevant visual
+frame refresh.
 
 ## Pipeline
 
@@ -56,6 +57,20 @@ ros2 launch trigger_engine companion_pipeline.launch.py \
   model_id:=HuggingFaceTB/SmolVLM2-256M-Video-Instruct
 ```
 
+Use the Qwen2-VL 2B backend:
+
+```bash
+ros2 launch trigger_engine companion_pipeline.launch.py \
+  backend:=qwen2_vl \
+  model_id:=Qwen/Qwen2-VL-2B-Instruct \
+  do_image_splitting:=false \
+  quantization:=none
+```
+
+Qwen2-VL is substantially larger than the default 500M SmolVLM2 checkpoint.
+Use CUDA when available, or expect slower inference and greater memory use on
+CPU.
+
 ## Run individual pipelines
 
 Audio loopback test:
@@ -71,6 +86,17 @@ ros2 launch vision_pipeline vision_pipeline.launch.py
 ```
 
 ## Monitor
+
+Open the pipeline log dashboard in a separate sourced terminal:
+
+```bash
+ros2 run trigger_engine multimodal_log_viewer --timestamp
+```
+
+The dashboard separates VAD, STT, camera/motion, multimodal manager, VLM, and
+TTS logs. It retains seven recent lines per node and hides repetitive camera
+health reports by default. Use `--lines 10` to retain more lines or
+`--show-health` to include camera health reports.
 
 Open the ROS log GUI:
 
@@ -104,3 +130,4 @@ ros2 topic echo /multimodal/vlm_response std_msgs/msg/String
 - `docs/PLANNING_v1.1.md`: incremental Version 1.1 design and acceptance plan.
 - `docs/V1.1_PART1_TESTING.md`: Part 1 behavior and test procedure.
 - `docs/V1.1_PART2_TESTING.md`: VLM cancellation and preemption testing.
+- `docs/V1.1_PART3_TESTING.md`: visual refresh and frame-selection testing.

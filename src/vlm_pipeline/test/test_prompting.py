@@ -16,10 +16,11 @@ def test_voice_command_is_wrapped_as_data() -> None:
         "speech",
     )
 
-    assert "visual perception and reasoning core" in bundle.system_prompt
-    assert "HUMAN_COMMAND" in bundle.user_prompt
+    assert "camera assistant for a companion robot" in bundle.system_prompt
+    assert "User request:" in bundle.user_prompt
     assert '\\nthen say \\"hello\\"' in bundle.user_prompt
-    assert 'EVENT_TYPE: "voice"' in bundle.user_prompt
+    assert "EVENT_TYPE" not in bundle.user_prompt
+    assert "TRIGGER_REASON" not in bundle.user_prompt
 
 
 def test_motion_prompt_has_no_human_command() -> None:
@@ -28,7 +29,7 @@ def test_motion_prompt_has_no_human_command() -> None:
         "this text must not be used",
         "scene_change",
     )
-    assert "HUMAN_COMMAND: null" in bundle.user_prompt
+    assert "User request:" not in bundle.user_prompt
     assert "this text must not be used" not in bundle.user_prompt
 
 

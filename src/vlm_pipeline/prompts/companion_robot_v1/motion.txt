@@ -1,5 +1,3 @@
-EVENT_TYPE: __EVENT_TYPE_JSON__
-TRIGGER_REASON: __TRIGGER_REASON_JSON__
-HUMAN_COMMAND: null
+Describe the most noticeable person, object, or situation visible in the image.
 
-This is passive observation without a human command. Return one short description of the relevant scene change for the companion robot to speak. Mention possible emotion only when visible evidence supports it, and state uncertainty when evidence is weak. Do not propose or claim a physical action.
+Use one short sentence. Do not guess what changed or how someone feels.
