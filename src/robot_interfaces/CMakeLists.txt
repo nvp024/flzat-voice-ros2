@@ -12,11 +12,14 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SpeechAudio.msg"
   "msg/VisualEvent.msg"
   "msg/MultimodalEvent.msg"
+  "msg/ObjectDetection2D.msg"
+  "msg/SemanticObject.msg"
   "srv/GetFrameNear.srv"
   "srv/GetFramesAround.srv"
   "action/SpeechToText.action"
   "action/TextToSpeech.action"
   "action/RunVlm.action"
+  "action/AnalyzeEnvironment.action"
   DEPENDENCIES builtin_interfaces sensor_msgs std_msgs action_msgs
 )
 

@@ -20,6 +20,8 @@ def generate_launch_description():
         DeclareLaunchArgument("local_files_only", default_value="false"),
         DeclareLaunchArgument("prompt_profile", default_value="companion_robot_v1"),
         DeclareLaunchArgument("prompt_directory", default_value=""),
+        DeclareLaunchArgument("environment_prompt_directory", default_value=""),
+        DeclareLaunchArgument("environment_max_new_tokens", default_value="256"),
         DeclareLaunchArgument("do_image_splitting", default_value="false"),
         Node(
             package="vlm_pipeline",
@@ -57,6 +59,14 @@ def generate_launch_description():
                 ),
                 "prompt_directory": ParameterValue(
                     LaunchConfiguration("prompt_directory"), value_type=str
+                ),
+                "environment_prompt_directory": ParameterValue(
+                    LaunchConfiguration("environment_prompt_directory"),
+                    value_type=str,
+                ),
+                "environment_max_new_tokens": ParameterValue(
+                    LaunchConfiguration("environment_max_new_tokens"),
+                    value_type=int,
                 ),
                 "do_image_splitting": ParameterValue(
                     LaunchConfiguration("do_image_splitting"), value_type=bool

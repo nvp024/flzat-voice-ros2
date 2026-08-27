@@ -22,14 +22,15 @@ continues independently while VLM and TTS requests are processed.
 
 - `audio_pipeline`: microphone VAD, Whisper STT, and TTS.
 - `vision_pipeline`: camera capture, motion detection, and frame ring buffer.
-- `vlm_pipeline`: replaceable VLM action server and prompt profiles.
+- `vlm_pipeline`: replaceable shared VLM server, prompt profiles, and global
+  voice/environment/motion inference priority broker.
 - `trigger_engine`: audio/visual fusion and asynchronous VLM/TTS coordination.
 - `robot_interfaces`: custom ROS messages, services, and actions.
 
 ## Build
 
 ```bash
-cd /home/phucnv/Documents/JTR/High_system/flzat_robot_ws
+cd <integrate-root>/flzat-voice-ros2
 source /opt/ros/jazzy/setup.bash
 colcon build --symlink-install
 source install/setup.bash
@@ -84,6 +85,23 @@ Vision test:
 ```bash
 ros2 launch vision_pipeline vision_pipeline.launch.py
 ```
+
+Reusable speech services without the audio loopback client:
+
+```bash
+ros2 launch audio_pipeline speech_services.launch.py
+```
+
+The shared VLM server exposes both `/vlm/run` and
+`/vlm/analyze_environment`. Voice requests have priority over background
+environment requests, which have priority over motion-only requests. The
+server runs one inference and retains at most one latest pending request.
+
+The environment action and prompt transport are Phase 2 foundations for the
+separate environment-memory workspace. Strict JSON validation, repair retry,
+and conversion into `SemanticObject` results belong to environment-memory
+Phase 6; until then, successful environment inference is available in the
+action's `raw_response` field.
 
 ## Monitor
 

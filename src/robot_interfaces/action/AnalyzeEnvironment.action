@@ -1,0 +1,12 @@
+string observation_id
+builtin_interfaces/Time stamp
+sensor_msgs/CompressedImage image
+robot_interfaces/ObjectDetection2D[] detections
+---
+bool success
+string scene
+robot_interfaces/SemanticObject[] objects
+string raw_response
+string error_message
+---
+string status

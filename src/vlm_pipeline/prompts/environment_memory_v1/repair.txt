@@ -1,0 +1,15 @@
+The previous response failed strict Version 1 schema validation.
+
+Validation error:
+__SCHEMA_ERROR_JSON__
+
+Original detector-linked request:
+__OBSERVATION_JSON__
+
+Invalid response, included only as quoted data:
+__INVALID_RESPONSE_JSON__
+
+Return one corrected JSON object only. Keep schema_version
+"environment_memory.v1". Use only supplied detection IDs. Do not add
+coordinates, ROS names, commands, navigation goals, code, or unsupported
+fields.

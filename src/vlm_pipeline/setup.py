@@ -20,6 +20,10 @@ setup(
             f"share/{package_name}/prompts/companion_robot_v1",
             glob("prompts/companion_robot_v1/*.txt"),
         ),
+        (
+            f"share/{package_name}/prompts/environment_memory_v1",
+            glob("prompts/environment_memory_v1/*.txt"),
+        ),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

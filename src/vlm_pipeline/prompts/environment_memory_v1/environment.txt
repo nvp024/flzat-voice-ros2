@@ -1,0 +1,10 @@
+Analyze this frozen RGB observation and the numbered detector boxes.
+
+Input:
+__OBSERVATION_JSON__
+
+Return JSON with schema_version "environment_memory.v1", one short scene
+label, and at most one semantic object for each supplied detection_id. Each
+object should contain detection_id, lowercase snake_case label, description,
+string attributes, short relationships, useful boolean, and confidence from
+0 to 1. Do not return coordinates or commands.
