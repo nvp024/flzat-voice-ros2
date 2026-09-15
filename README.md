@@ -72,6 +72,17 @@ Qwen2-VL is substantially larger than the default 500M SmolVLM2 checkpoint.
 Use CUDA when available, or expect slower inference and greater memory use on
 CPU.
 
+Environment-memory grounding uses the Qwen3-VL adapter:
+
+```bash
+python3 -c "import torch, transformers, qwen_vl_utils; from transformers import Qwen3VLForConditionalGeneration"
+
+ros2 launch vlm_pipeline vlm_server.launch.py \
+  backend:=qwen3_vl \
+  model_id:=Qwen/Qwen3-VL-2B-Instruct \
+  device:=cuda
+```
+
 ## Run individual pipelines
 
 Audio loopback test:
@@ -92,16 +103,10 @@ Reusable speech services without the audio loopback client:
 ros2 launch audio_pipeline speech_services.launch.py
 ```
 
-The shared VLM server exposes both `/vlm/run` and
-`/vlm/analyze_environment`. Voice requests have priority over background
-environment requests, which have priority over motion-only requests. The
-server runs one inference and retains at most one latest pending request.
-
-The environment action and prompt transport are Phase 2 foundations for the
-separate environment-memory workspace. Strict JSON validation, repair retry,
-and conversion into `SemanticObject` results belong to environment-memory
-Phase 6; until then, successful environment inference is available in the
-action's `raw_response` field.
+The shared VLM server exposes `/vlm/run` for companion interaction and
+`/vlm/ground_objects` for environment-memory grounding. Interaction requests
+have priority over background grounding. The server runs one inference and
+retains at most one latest pending request.
 
 ## Monitor
 

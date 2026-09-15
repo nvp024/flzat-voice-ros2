@@ -21,8 +21,8 @@ setup(
             glob("prompts/companion_robot_v1/*.txt"),
         ),
         (
-            f"share/{package_name}/prompts/environment_memory_v1",
-            glob("prompts/environment_memory_v1/*.txt"),
+            f"share/{package_name}/prompts/environment_grounding_qwen3_v5",
+            glob("prompts/environment_grounding_qwen3_v5/*.txt"),
         ),
     ],
     install_requires=["setuptools"],

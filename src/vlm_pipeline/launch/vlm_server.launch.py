@@ -12,6 +12,7 @@ def generate_launch_description():
             "model_id",
             default_value="HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
         ),
+        DeclareLaunchArgument("model_revision", default_value="main"),
         DeclareLaunchArgument("device", default_value="auto"),
         DeclareLaunchArgument("dtype", default_value="auto"),
         DeclareLaunchArgument("quantization", default_value="none"),
@@ -20,8 +21,14 @@ def generate_launch_description():
         DeclareLaunchArgument("local_files_only", default_value="false"),
         DeclareLaunchArgument("prompt_profile", default_value="companion_robot_v1"),
         DeclareLaunchArgument("prompt_directory", default_value=""),
-        DeclareLaunchArgument("environment_prompt_directory", default_value=""),
-        DeclareLaunchArgument("environment_max_new_tokens", default_value="256"),
+        DeclareLaunchArgument("grounding_max_new_tokens", default_value="512"),
+        DeclareLaunchArgument("grounding_prompt_directory", default_value=""),
+        DeclareLaunchArgument(
+            "qwen_min_image_pixels", default_value=str(256 * 256)
+        ),
+        DeclareLaunchArgument(
+            "qwen_max_image_pixels", default_value=str(768 * 768)
+        ),
         DeclareLaunchArgument("do_image_splitting", default_value="false"),
         Node(
             package="vlm_pipeline",
@@ -35,6 +42,9 @@ def generate_launch_description():
                 ),
                 "model_id": ParameterValue(
                     LaunchConfiguration("model_id"), value_type=str
+                ),
+                "model_revision": ParameterValue(
+                    LaunchConfiguration("model_revision"), value_type=str
                 ),
                 "device": ParameterValue(
                     LaunchConfiguration("device"), value_type=str
@@ -60,13 +70,19 @@ def generate_launch_description():
                 "prompt_directory": ParameterValue(
                     LaunchConfiguration("prompt_directory"), value_type=str
                 ),
-                "environment_prompt_directory": ParameterValue(
-                    LaunchConfiguration("environment_prompt_directory"),
+                "grounding_max_new_tokens": ParameterValue(
+                    LaunchConfiguration("grounding_max_new_tokens"),
+                    value_type=int,
+                ),
+                "grounding_prompt_directory": ParameterValue(
+                    LaunchConfiguration("grounding_prompt_directory"),
                     value_type=str,
                 ),
-                "environment_max_new_tokens": ParameterValue(
-                    LaunchConfiguration("environment_max_new_tokens"),
-                    value_type=int,
+                "qwen_min_image_pixels": ParameterValue(
+                    LaunchConfiguration("qwen_min_image_pixels"), value_type=int
+                ),
+                "qwen_max_image_pixels": ParameterValue(
+                    LaunchConfiguration("qwen_max_image_pixels"), value_type=int
                 ),
                 "do_image_splitting": ParameterValue(
                     LaunchConfiguration("do_image_splitting"), value_type=bool

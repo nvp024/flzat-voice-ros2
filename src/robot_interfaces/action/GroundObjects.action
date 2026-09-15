@@ -1,11 +1,13 @@
 string observation_id
 builtin_interfaces/Time stamp
 sensor_msgs/CompressedImage image
-robot_interfaces/ObjectDetection2D[] detections
 ---
 bool success
-string scene
-robot_interfaces/SemanticObject[] objects
+string observation_id
+robot_interfaces/ObjectDetection2D[] detections
+string model_id
+string model_revision
+string prompt_version
 string raw_response
 string error_message
 ---

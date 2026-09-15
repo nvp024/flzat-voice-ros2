@@ -19,7 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/SpeechToText.action"
   "action/TextToSpeech.action"
   "action/RunVlm.action"
-  "action/AnalyzeEnvironment.action"
+  "action/GroundObjects.action"
   DEPENDENCIES builtin_interfaces sensor_msgs std_msgs action_msgs
 )
 
