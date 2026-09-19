@@ -297,8 +297,8 @@ class VlmNode(Node):
         ticket = None
         token_registered = False
         request = goal_handle.request
-        self._set_grounding_provenance(result, request.observation_id)
         try:
+            self._set_grounding_provenance(result, request.observation_id)
             self._cancel_tokens.register(goal_handle, token)
             token_registered = True
             ticket = self._broker.submit(
@@ -479,7 +479,7 @@ class VlmNode(Node):
         result.observation_id = observation_id
         result.model_id = self._backend.config.model_id
         result.model_revision = self._backend.model_revision
-        result.prompt_version = self._grounding_prompt_builder.build([], True).version
+        result.prompt_version = self._grounding_prompt_builder.build().version
 
     @staticmethod
     def _grounding_detection(observation_id: str, detection_id: int, value):
